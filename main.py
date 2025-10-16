@@ -3,93 +3,147 @@ import random
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from openai import OpenAI
-import os 
+from selenium.webdriver.chrome.options import Options
+import os
+import requests
+from dotenv import load_dotenv
+
+# Load environment variables from env file
+load_dotenv("api_key.env")  # Specify the custom env file name
 
 # --- CONFIGURATION ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") 
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 
 TARGET_COMPANY = "Google"          # Your desired company
-TARGET_UNIVERSITY = "Stanford University" # Your university name
+TARGET_UNIVERSITY = "Vanderbilt University" # Your university name
 MAX_REQUESTS_PER_RUN = 10          # CRITICAL SAFETY LIMIT: Start small (5-10) and only run once per day.
-
-# Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 # --- 1. SETUP: BROWSER INITIALIZATION (NO LOGIN) ---
 def setup_browser():
-    """Initializes the Chrome browser, assuming user is already logged in."""
-    options = webdriver.ChromeOptions()
-    # options.add_argument("--headless")  # Uncomment to run without a visible browser window
+    """Initializes the Brave browser using a separate automation profile."""
+    options = Options()
     
-    # Use a persistent user data directory if you want to ensure the session/login sticks.
-    # Replace 'C:\\...\\LinkedIn_Profile' with a custom path on your machine.
-    # options.add_argument("user-data-dir=/path/to/your/chrome/profile") 
+    # Set the binary location to Brave browser
+    options.binary_location = "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
     
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+    # Create a unique automation profile directory
+    automation_profile = os.path.join(
+        os.path.expanduser("~"),
+        "AppData\\Local\\BraveSoftware\\Automation_Profile"
+    )
+    
+    # Create the directory if it doesn't exist
+    if not os.path.exists(automation_profile):
+        os.makedirs(automation_profile)
+    
+    # Use the separate automation profile
+    options.add_argument(f"--user-data-dir={automation_profile}")
+    options.add_argument("--profile-directory=Default")
+    
+    # Add additional options for compatibility
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    
+    # Disable notification prompts
+    options.add_argument("--disable-notifications")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    
+    # Let Selenium handle driver installation automatically
+    driver = webdriver.Chrome(options=options)
     
     # Navigate to LinkedIn to ensure the session is active
+    print("Checking LinkedIn session...")
     driver.get("https://www.linkedin.com/feed/")
-    time.sleep(random.uniform(2, 4))
-    
+    time.sleep(20)  # Longer delay for profile loading
+    #random.uniform(3, 5)
     if "login" in driver.current_url.lower():
-        print("ERROR: Login check failed. Please ensure you are logged in before running this script.")
+        print("ERROR: Login check failed. Please log into LinkedIn in your Brave browser first.")
         driver.quit()
         raise Exception("Not Logged In")
+    
+    # Additional check for the nav bar which is only visible when logged in
+    try:
+        driver.find_element(By.ID, "global-nav")
+        print("LinkedIn session verified - you are logged in.")
+    except:
+        print("ERROR: Could not verify LinkedIn session. Please check your login in Brave browser.")
+        driver.quit()
+        raise Exception("Session verification failed")
         
-    print("Browser setup complete. LinkedIn session appears active.")
+    print("Browser setup complete. LinkedIn session is active.")
     return driver
 
 # --- 2. SEARCH & SCRAPE PROFILES ---
 def search_and_get_profiles(driver, company, university):
-    """Navigates to the search URL with filters and scrapes profile links."""
+    """Navigates to the company's people page with school filter."""
     
-    # Constructing a clean search URL based on People, Current Company, and School filters.
-    # NOTE: This format is based on typical LinkedIn URLs but may break if LinkedIn updates its structure.
-    search_url = (
-        f"https://www.linkedin.com/search/results/people/"
-        f"?currentCompany={company.replace(' ', '%20')}"
-        f"&school={university.replace(' ', '%20')}"
-        f"&origin=SWITCH_SEARCH_VERTICAL"
-    )
-
-    print(f"Navigating to search results for {company} employees from {university}...")
-    driver.get(search_url)
-    time.sleep(random.uniform(5, 7))
-
-    # XPATH to locate profile elements on the search results page.
-    # This targets the main link element for a profile.
-    profile_elements = driver.find_elements(By.XPATH, "//a[contains(@href, '/in/') and not(contains(@href, '/public-profile/'))]")
+    # First navigate to the company page
+    company_url = f"https://www.linkedin.com/company/{company.lower().replace(' ', '-')}/people/?facetSchool=4565"
+    print(f"Opening {company}'s people page filtered for Vanderbilt alumni...")
+    driver.get(company_url)
+    
+    # Wait for the page to load
+    time.sleep(5)
+    
+    print("Looking for profile links...")
+    
+    # Scroll down a bit to load more content
+    driver.execute_script("window.scrollBy(0, 500);")
+    time.sleep(2)
     
     profile_data = []
-    unique_urls = set()
-
-    for element in profile_elements:
-        url = element.get_attribute('href').split('?')[0]
-        # Basic filter to ensure it's a person's profile
-        if "/in/" in url and url not in unique_urls:
+    
+    try:
+        # Try to find profile links using the specific class
+        profile_links = driver.find_elements(
+            By.CSS_SELECTOR,
+            "a.ember-view.link-without-visited-state.t-bold"
+        )
+        print(profile_links)
+        
+        print(f"Found {len(profile_links)} potential profile links")
+        
+        # Try clicking on the first few profiles
+        for i, link in enumerate(profile_links[:3]):  # Start with just 3 profiles for testing
             try:
-                # Attempt to find the person's name element within the profile card
-                name_element = element.find_element(By.XPATH, ".//span[@aria-hidden='true']")
-                name = name_element.text if name_element else "Unknown Name"
+                print(f"Attempting to click profile {i+1}...")
                 
-                profile_data.append({'url': url, 'name': name})
-                unique_urls.add(url)
+                # Scroll the link into view
+                driver.execute_script("arguments[0].scrollIntoView(true);", link)
+                time.sleep(1)
                 
-                if len(profile_data) >= MAX_REQUESTS_PER_RUN:
-                    break
-            except Exception:
-                # Skip if the name element couldn't be found (e.g., non-person link)
+                # Get profile info before clicking
+                url = link.get_attribute('href')
+                name = link.text.strip()
+                
+                # Click the link
+                link.click()
+                time.sleep(3)  # Wait for profile to load
+                
+                # Store the profile info
+                if name and url:
+                    profile_data.append({'url': url, 'name': name})
+                    print(f"Successfully clicked and stored profile: {name}")
+                
+                # Go back to the search results
+                driver.back()
+                time.sleep(2)
+                
+            except Exception as e:
+                print(f"Error clicking profile: {str(e)}")
                 continue
-
-    print(f"Found {len(profile_data)} unique profiles to process.")
+                
+    except Exception as e:
+        print(f"Error finding profiles: {str(e)}")
+    
+    print(f"Successfully processed {len(profile_data)} profiles")
     return profile_data
 
 # --- 3. AI MESSAGE GENERATION ---
 def generate_coffee_chat_note(name, company, university):
-    """Calls the OpenAI API to generate a personalized connection note."""
+    """Calls the Claude API to generate a personalized connection note."""
     print(f"Generating note for {name}...")
     
     # Prompting for a professional, concise, and friendly note
@@ -101,17 +155,26 @@ def generate_coffee_chat_note(name, company, university):
     )
     
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": CLAUDE_API_KEY,
+            "anthropic-version": "2023-06-01"
+        }
+        
+        data = {
+            "model": "claude-3-haiku-20240307",
+            "max_tokens": 150,
+            "messages": [
                 {"role": "system", "content": "You are a professional networking assistant."},
                 {"role": "user", "content": prompt}
-            ],
-            max_tokens=80 # Keep tokens low to ensure message brevity
-        )
+            ]
+        }
+        
+        response = requests.post(CLAUDE_API_URL, headers=headers, json=data)
+        response.raise_for_status()
         
         # Extract and clean up the message
-        note = response.choices[0].message.content.strip().replace('\n', ' ')
+        note = response.json()['content'][0]['text'].strip().replace('\n', ' ')
         
         # Replace the placeholder [First Name] with the actual name
         first_name = name.split()[0]
@@ -121,7 +184,7 @@ def generate_coffee_chat_note(name, company, university):
         return note[:300]
     
     except Exception as e:
-        print(f"OpenAI API call failed: {e}. Using fallback message.")
+        print(f"Claude API call failed: {e}. Using fallback message.")
         return f"Hi {name.split()[0]}, I'm reaching out as a fellow {university} alumnus/student and admire your work at {company}. Would you be open to a quick virtual coffee chat?"
 
 # --- 4. OUTREACH AND SAFETY MEASURES ---
@@ -171,8 +234,8 @@ def send_connection_request(driver, profile_url, name, message):
 
 # --- MAIN EXECUTION ---
 def main():
-    if not OPENAI_API_KEY:
-        print("FATAL ERROR: Please set your OPENAI_API_KEY environment variable.")
+    if not CLAUDE_API_KEY:
+        print("FATAL ERROR: Please set your CLAUDE_API_KEY environment variable.")
         return
 
     driver = setup_browser()
@@ -186,16 +249,16 @@ def main():
             name = profile['name']
             url = profile['url']
             
-            # Generate personalized note
-            note = generate_coffee_chat_note(name, TARGET_COMPANY, TARGET_UNIVERSITY)
+            # # Generate personalized note
+            # note = generate_coffee_chat_note(name, TARGET_COMPANY, TARGET_UNIVERSITY)
             
-            # Send the connection request
-            send_connection_request(driver, url, name, note)
+            # # Send the connection request
+            # send_connection_request(driver, url, name, note)
             
-            # CRITICAL: Add a randomized delay to avoid LinkedIn detection
-            delay = random.uniform(45, 120) # Delay between 45 and 120 seconds (1.5 - 2 minutes)
-            print(f"Pausing for {round(delay, 2)} seconds before processing the next profile...")
-            time.sleep(delay)
+            # # CRITICAL: Add a randomized delay to avoid LinkedIn detection
+            # delay = random.uniform(45, 120) # Delay between 45 and 120 seconds (1.5 - 2 minutes)
+            # print(f"Pausing for {round(delay, 2)} seconds before processing the next profile...")
+            # time.sleep(delay)
 
     finally:
         print("Automation finished. Closing browser.")
